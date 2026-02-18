@@ -1,15 +1,5 @@
 // shell.qml — mango-bar for Hyprland
-// Ported from MangoWC/dwl to Hyprland
 //
-// Key changes from the dwl version:
-//   • Workspace switching  : Quickshell.Hyprland IPC instead of `mmsg`
-//   • Layout indicator     : reads active Hyprland layout name via IPC
-//   • Tag/workspace model  : Hyprland uses numbered workspaces (1-9) not dwl tags
-//   • No WlrLayershell     : use Quickshell.Hyprland.HyprlandLayershell / standard
-//     Quickshell LayerShell which maps cleanly to wlr-layer-shell (Hyprland supports it)
-//   • Removed mmsg Process nodes entirely
-//   • Everything else (weather, music, wifi, calendar, system tray, cava) unchanged
-
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Hyprland
@@ -126,13 +116,8 @@ ShellRoot {
 
     // ═══════════════════════════════════════════════════════════════════════
     // ─── Hyprland Workspace & Layout State ───────────────────────────────
-    //
-    // In Hyprland we query workspaces via `hyprctl workspaces -j` (JSON) and
-    // listen for workspace events over the Hyprland IPC socket.
-    // We support workspaces 1-9 matching the original 9-tag layout.
     // ═══════════════════════════════════════════════════════════════════════
 
-    // ─── Hyprland Workspace State (native IPC) ────────────────────────────
     function switchWorkspace(num) {
         Hyprland.dispatch("workspace " + num)
     }
@@ -272,6 +257,8 @@ ShellRoot {
         interval: 900000; running: true; repeat: true
         onTriggered: root.fetchWeatherFull()
     }
+
+    // Weather loads fully on startup — no more staring at "--°C" like a muppet
     Component.onCompleted: root.fetchWeatherFull()
 
     // ─── Clock & Battery ──────────────────────────────────────────────────
@@ -291,11 +278,12 @@ ShellRoot {
     property bool   batCharging: batStatus === "Charging" || batStatus === "Full"
     property color  batColor:    batCharging ? "#32d74b" : batCapacity <= 20 ? "#ff453a" : "#ffffff"
 
+    // Fixed: BAT0 → BAT1
     Process {
         command: [
             "bash", "-c",
-            "while true; do cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo 100; " +
-            "cat /sys/class/power_supply/BAT0/status 2>/dev/null || echo Unknown; sleep 30; done"
+            "while true; do cat /sys/class/power_supply/BAT1/capacity 2>/dev/null || echo 0; " +
+            "cat /sys/class/power_supply/BAT1/status 2>/dev/null || echo Unknown; sleep 30; done"
         ]
         running: true
         stdout: SplitParser {
@@ -521,24 +509,30 @@ ShellRoot {
     // ═══════════════════════════════════════════════════════════════════════
     property bool   wifiPopupVisible:   false
     property string wifiSsid:           ""
-    property string wifiSignal:         ""
+    property int    wifiSignal:         0        // live signal strength for the bar pill
     property var    wifiNetworks:       []
     property bool   wifiScanning:       false
     property string wifiConnectMsg:     ""
     property string wifiExpandedSsid:   ""
     property string wifiPasswordInput:  ""
 
+    // Fetches both SSID and signal strength every 10s
     Process {
         id: wifiStatusProc
         command: ["bash", "-c",
             "while true; do " +
             "  ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '/^yes/{print $2}' | head -1); " +
-            "  echo \"$ssid\"; sleep 10; " +
+            "  sig=$(nmcli -t -f active,signal dev wifi 2>/dev/null | awk -F: '/^yes/{print $2}' | head -1); " +
+            "  echo \"$ssid\"; echo \"${sig:-0}\"; sleep 10; " +
             "done"
         ]
         running: true
         stdout: SplitParser {
-            onRead: (line) => { root.wifiSsid = line.trim() }
+            property bool nextIsSignal: false
+            onRead: (line) => {
+                if (!nextIsSignal) { root.wifiSsid   = line.trim();              nextIsSignal = true  }
+                else               { root.wifiSignal = parseInt(line.trim()) || 0; nextIsSignal = false }
+            }
         }
     }
 
@@ -695,7 +689,7 @@ ShellRoot {
                         }
                         Text {
                             anchors.centerIn: parent
-                            text: "\uf303"
+                            text: "\uf31f"
                             font.family: "Symbols Nerd Font"; font.pixelSize: 18; color: "white"
                         }
                         MouseArea {
@@ -772,11 +766,28 @@ ShellRoot {
                         }
                         RowLayout {
                             id: wifiPillRow; anchors.centerIn: parent; spacing: 6
-                            Text {
-                                text: root.wifiSsid.length > 0 ? "\uf1eb" : "\uf204"
-                                font.family: "Symbols Nerd Font"; font.pixelSize: 14
-                                color: root.wifiSsid.length > 0 ? "white" : Qt.rgba(1,1,1,0.35)
+
+                            // Signal strength bars — scale with live wifiSignal
+                            Row {
+                                spacing: 2
+                                Repeater {
+                                    model: 4
+                                    delegate: Rectangle {
+                                        width: 3
+                                        height: 4 + index * 3
+                                        radius: 1
+                                        anchors.bottom: parent ? parent.bottom : undefined
+                                        color: {
+                                            if (root.wifiSsid.length === 0) return Qt.rgba(1,1,1,0.15)
+                                            return root.wifiSignal >= (index + 1) * 25
+                                                ? "white"
+                                                : Qt.rgba(1,1,1,0.20)
+                                        }
+                                        Behavior on color { ColorAnimation { duration: 200 } }
+                                    }
+                                }
                             }
+
                             Text {
                                 text: root.wifiSsid.length > 0 ? root.wifiSsid : "No WiFi"
                                 font.family: "SF Pro Display"; font.pixelSize: 12
@@ -1098,7 +1109,7 @@ ShellRoot {
                                     root.weatherTemp = "--°C"; root.weatherIcon = "🌡️"
                                     root.currentTemp = "--°C"; root.currentDesc = "—"
                                     root.todayLow = "--°"; root.todayHigh = "--°"; root.currentEmoji = "🌡️"
-                                    root.fetchWeatherPill(); root.saveSettings()
+                                    root.fetchWeatherFull(); root.saveSettings()
                                 }
                                 Rectangle { id: applyBg; anchors.fill: parent; radius: root.pillRadius; color: Qt.rgba(0.42,0.68,1.0,0.22); border.color: Qt.rgba(0.42,0.68,1.0,0.35); border.width: 1; Behavior on color { ColorAnimation { duration: 120 } } }
                                 Text { id: applyLabel; anchors.centerIn: parent; text: "Apply"; font.family: "SF Pro Display"; font.pixelSize: 11; color: Qt.rgba(0.72,0.88,1.0,0.90) }
@@ -1654,11 +1665,31 @@ ShellRoot {
                                 }
                                 RowLayout { x: 0; y: 0; width: parent.width; height: 38; anchors { left: parent.left; right: parent.right; leftMargin: 10; rightMargin: 10 }
                                     spacing: 10
-                                    Row { spacing: 2
-                                        Repeater { model: 4
-                                            delegate: Rectangle { width: 3; height: 4 + index * 3; radius: 1; anchors.bottom: parent ? parent.bottom : undefined; color: { var lit = modelData.signal >= (index + 1) * 25; if (!lit) return Qt.rgba(1,1,1,0.15); return isConnected ? Qt.rgba(0.30,0.90,0.45,0.90) : isExpanded ? Qt.rgba(0.72,0.88,1.0,0.85) : Qt.rgba(1,1,1,0.70) } }
+
+                                    // Signal bars in the popup — proportional height + colour by state
+                                    Row {
+                                        spacing: 2
+                                        Repeater {
+                                            model: 4
+                                            delegate: Rectangle {
+                                                width: 3
+                                                height: 4 + index * 3
+                                                radius: 1
+                                                anchors.bottom: parent ? parent.bottom : undefined
+                                                color: {
+                                                    var lit = modelData.signal >= (index + 1) * 25
+                                                    if (!lit) return Qt.rgba(1,1,1,0.15)
+                                                    return isConnected
+                                                        ? Qt.rgba(0.30, 0.90, 0.45, 0.90)
+                                                        : isExpanded
+                                                            ? Qt.rgba(0.72, 0.88, 1.0, 0.85)
+                                                            : Qt.rgba(1,1,1,0.70)
+                                                }
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                            }
                                         }
                                     }
+
                                     Text { Layout.fillWidth: true; text: modelData.ssid; font.family: "SF Pro Display"; font.pixelSize: 12; font.weight: (isConnected || isExpanded) ? Font.SemiBold : Font.Normal; color: isConnected ? Qt.rgba(0.50,1.0,0.60,0.95) : isExpanded ? Qt.rgba(0.72,0.88,1.0,0.95) : "white"; elide: Text.ElideRight; Behavior on color { ColorAnimation { duration: 110 } } }
                                     Text { visible: isSecured; text: "\uf023"; font.family: "Symbols Nerd Font"; font.pixelSize: 10; color: isExpanded ? Qt.rgba(0.72,0.88,1.0,0.55) : Qt.rgba(1,1,1,0.28) }
                                     Text { visible: isConnected; text: "\uf00c"; font.family: "Symbols Nerd Font"; font.pixelSize: 10; color: Qt.rgba(0.30,0.90,0.45,0.90) }
