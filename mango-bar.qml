@@ -543,7 +543,7 @@ ShellRoot {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ─── WiFi State (nmcli backend — NetworkManager + iwd) ────────────────
+    // ─── WiFi State (iwctl backend — pure iwd) ────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════
     property bool   wifiPopupVisible:   false
     property string wifiSsid:           ""
@@ -554,22 +554,21 @@ ShellRoot {
     property string wifiExpandedSsid:   ""
     property string wifiPasswordInput:  ""
 
-    // ── Live SSID + signal every 5s via nmcli ─────────────────────────────
-    // nmcli -t -f active,ssid,signal dev wifi gives us a clean terse line
-    // for the currently active AP.  No interface detection needed — NM knows.
+    // ── Live SSID + signal every 5s via iwctl ─────────────────────────────
+    // iwctl station wlan0 show gives us connected network and rssi
     Process {
         id: wifiStatusProc
         command: [
             "bash", "-c",
             "while true; do " +
-            "  result=$(nmcli -t -f active,ssid,signal dev wifi 2>/dev/null | grep '^yes:'); " +
-            "  if [ -n \"$result\" ]; then " +
-            "    ssid=$(echo \"$result\" | cut -d: -f2); " +
-            "    signal=$(echo \"$result\" | cut -d: -f3); " +
-            "    echo \"$ssid\"; " +
-            "    echo \"${signal:-0}\"; " +
+            "  info=$(iwctl station wlan0 show 2>/dev/null); " +
+            "  ssid=$(echo \"$info\" | grep 'Connected network' | sed 's/.*Connected network\\s*//' | xargs); " +
+            "  rssi=$(echo \"$info\" | grep 'RSSI' | grep -o '\\-[0-9]*' | head -1); " +
+            "  echo \"${ssid:-}\"; " +
+            "  if [ -n \"$rssi\" ]; then " +
+            "    sig=$(awk \"BEGIN{v=$rssi+100; if(v<0)v=0; if(v>100)v=100; print int(v)}\"); " +
+            "    echo \"$sig\"; " +
             "  else " +
-            "    echo ''; " +
             "    echo '0'; " +
             "  fi; " +
             "  sleep 5; " +
@@ -579,41 +578,51 @@ ShellRoot {
         stdout: SplitParser {
             property bool nextIsSignal: false
             onRead: (line) => {
-                if (!nextIsSignal) { root.wifiSsid   = line.trim();              nextIsSignal = true  }
+                if (!nextIsSignal) { root.wifiSsid   = line.trim();               nextIsSignal = true  }
                 else               { root.wifiSignal = parseInt(line.trim()) || 0; nextIsSignal = false }
             }
         }
     }
 
-    // ── Scan with nmcli ───────────────────────────────────────────────────
-    // rescan is async in NM too, so we wait 2s before reading the list.
-    // Output format: SSID:SECURITY:SIGNAL:ACTIVE
-    // SSIDs can contain colons so we split from the right (last 3 fields are known).
+    // ── Scan with iwctl ───────────────────────────────────────────────────
+    // iwctl station wlan0 get-networks rssi-bars gives us a table we parse.
+    // Format after stripping ANSI: "  > NetworkName  open/psk  ****  "
     Process {
         id: wifiScanProc
         running: false
         stdout: SplitParser {
             property var buf: []
             onRead: (line) => {
-                var clean = line.trim()
+                // Strip ANSI escape codes
+                var clean = line.replace(/\x1b\[[0-9;]*m/g, "").trim()
                 if (clean.length === 0) return
+                // Skip header lines
+                if (clean.indexOf("Network name") !== -1) return
+                if (clean.indexOf("----") !== -1) return
+                if (clean.indexOf("Available networks") !== -1) return
 
-                // Split carefully — SSID may contain colons, last 3 fields are safe
-                var parts = clean.split(":")
-                if (parts.length < 4) return
+                // Connected network starts with >
+                var connected = clean.charAt(0) === ">"
+                if (connected) clean = clean.substring(1).trim()
 
-                var active   = parts[parts.length - 1]               // "yes" or "no"
-                var sig      = parseInt(parts[parts.length - 2]) || 0
-                var security = parts[parts.length - 3]               // "WPA2", "--", "WPA1 WPA2", etc
-                var ssid     = parts.slice(0, parts.length - 3).join(":")  // rejoin SSID
+                // Last token is signal bars (****), second last is security
+                var parts = clean.split(/\s{2,}/)
+                if (parts.length < 3) return
+
+                var ssid     = parts[0].trim()
+                var security = parts[1].trim()  // "open" or "psk"
+                var bars     = parts[2].trim()  // "****", "***", etc
 
                 if (ssid.length === 0) return
+
+                // Convert bars to 0-100
+                var sig = Math.round((bars.replace(/[^*]/g, "").length / 4) * 100)
 
                 buf.push({
                     ssid:      ssid,
                     signal:    sig,
-                    security:  security === "--" ? "" : security,
-                    connected: active === "yes",
+                    security:  security === "open" ? "" : "WPA2",
+                    connected: connected,
                     icon:      "\uf1eb"
                 })
             }
@@ -643,14 +652,14 @@ ShellRoot {
 
         wifiScanProc.command = [
             "bash", "-c",
-            "nmcli dev wifi rescan 2>/dev/null; " +
-            "sleep 2; " +
-            "nmcli -t -f ssid,security,signal,active dev wifi list 2>/dev/null"
+            "iwctl station wlan0 scan 2>/dev/null; " +
+            "sleep 3; " +
+            "iwctl station wlan0 get-networks 2>/dev/null"
         ]
         wifiScanProc.running = true
     }
 
-    // ── Connect via nmcli ─────────────────────────────────────────────────
+    // ── Connect via iwctl ─────────────────────────────────────────────────
     Process {
         id: wifiConnectProc
         property string pendingSsid: ""
@@ -658,23 +667,33 @@ ShellRoot {
 
         stdout: SplitParser {
             onRead: (line) => {
-                var clean = line.trim()
+                var clean = line.replace(/\x1b\[[0-9;]*m/g, "").trim()
                 if (clean.length === 0) return
                 var low = clean.toLowerCase()
-                if (low.indexOf("successfully activated") !== -1 ||
-                    low.indexOf("connected") !== -1) {
+                if (low.indexOf("connected") !== -1) {
                     root.wifiConnectMsg = "✓  Connected to " + wifiConnectProc.pendingSsid
                 } else if (low.indexOf("error") !== -1 ||
                            low.indexOf("failed") !== -1 ||
-                           low.indexOf("secrets") !== -1 ||
-                           low.indexOf("no network") !== -1) {
+                           low.indexOf("not found") !== -1 ||
+                           low.indexOf("incorrect") !== -1) {
                     root.wifiConnectMsg = "✕  " + (
-                        low.indexOf("secrets") !== -1
+                        low.indexOf("incorrect") !== -1 || low.indexOf("psk") !== -1
                             ? "Wrong password"
-                            : low.indexOf("no network") !== -1
+                            : low.indexOf("not found") !== -1
                                 ? "Network not found"
                                 : "Connection failed"
                     )
+                }
+            }
+        }
+
+        stderr: SplitParser {
+            onRead: (line) => {
+                var clean = line.replace(/\x1b\[[0-9;]*m/g, "").trim()
+                if (clean.length === 0) return
+                var low = clean.toLowerCase()
+                if (low.indexOf("error") !== -1 || low.indexOf("failed") !== -1) {
+                    root.wifiConnectMsg = "✕  Connection failed"
                 }
             }
         }
@@ -683,7 +702,6 @@ ShellRoot {
             if (!running) {
                 if (root.wifiConnectMsg.indexOf("Connecting") !== -1)
                     root.wifiConnectMsg = "✕  Connection timed out"
-                // Refresh status pill and rescan
                 wifiStatusProc.running = false
                 wifiStatusProc.running = true
                 root.wifiStartScan()
@@ -696,11 +714,11 @@ ShellRoot {
         root.wifiConnectMsg         = "Connecting to " + ssid + "…"
         root.wifiExpandedSsid       = ""
 
-        var s   = ssid.replace(/'/g, "")
-        var p   = (password || "").replace(/'/g, "")
+        var s = ssid.replace(/'/g, "")
+        var p = (password || "").replace(/'/g, "")
         var cmd = p.length > 0
-            ? "nmcli dev wifi connect '" + s + "' password '" + p + "' 2>&1"
-            : "nmcli dev wifi connect '" + s + "' 2>&1"
+            ? "iwctl --passphrase '" + p + "' station wlan0 connect '" + s + "' 2>&1"
+            : "iwctl station wlan0 connect '" + s + "' 2>&1"
 
         wifiConnectProc.command = ["bash", "-c", cmd]
         wifiConnectProc.running = true
@@ -2660,4 +2678,6 @@ ShellRoot {
     }  // Variants (wifi popup)
 
 }  // ShellRoot
+
+
 

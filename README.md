@@ -5,13 +5,13 @@ Welcome to my Quickshell dotfiles for both Hyprland and MangoWC
 ### hypr-bar.qml (Hyprland)
 
 - `quickshell` + `quickshell-wayland` + `quickshell-hyprland`
-- `networkmanager` — with iwd backend enabled
 - `iwd`
 - `playerctl`
 - `glib2` — for `gsettings`
 - `cava` *(optional — audio visualiser)*
 - Symbols Nerd Font
 - SF Pro Display *(or a substitute)*
+- iwd and iwctl
 
 ### mango-bar.qml (MangoWC)
 
@@ -31,7 +31,3 @@ Copy the directory, cd into quickshell-btw, and copy your desired dotfiles to th
 1.1: customation
 
 I dunno, do what you like -- it's technically your bar now.
-
-1.2: redistribution
-
-See the LICENSE page. Anything not stated by the license can be done.
