@@ -313,7 +313,7 @@ ShellRoot {
         command: [
             "bash", "-c",
             "while true; do cat /sys/class/power_supply/BAT1/capacity 2>/dev/null || echo 100; " +
-            "cat /sys/class/power_supply/BAT1/status 2>/dev/null || echo Unknown; sleep 30; done"
+            "cat /sys/class/power_supply/BAT1/status 2>/dev/null || echo Unknown; sleep 1; done"
         ]
         running: true
         stdout: SplitParser {
@@ -566,7 +566,7 @@ ShellRoot {
             "  rssi=$(echo \"$info\" | grep 'RSSI' | grep -o '\\-[0-9]*' | head -1); " +
             "  echo \"${ssid:-}\"; " +
             "  if [ -n \"$rssi\" ]; then " +
-            "    sig=$(awk \"BEGIN{v=$rssi+100; if(v<0)v=0; if(v>100)v=100; print int(v)}\"); " +
+            "    sig=$(awk \"BEGIN{v=($rssi+90)/40*100; if(v<0)v=0; if(v>100)v=100; print int(v)}\"); " +
             "    echo \"$sig\"; " +
             "  else " +
             "    echo '0'; " +
@@ -2678,6 +2678,7 @@ ShellRoot {
     }  // Variants (wifi popup)
 
 }  // ShellRoot
+
 
 
 
