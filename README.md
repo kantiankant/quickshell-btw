@@ -11,7 +11,7 @@ Welcome to my Quickshell dotfiles for both Hyprland and MangoWC
 - `cava` *(optional — audio visualiser)*
 - Symbols Nerd Font
 - SF Pro Display *(or a substitute)*
-- iwd and iwctl
+- `iwctl` 
 
 ### mango-bar.qml (MangoWC)
 
@@ -23,6 +23,8 @@ Welcome to my Quickshell dotfiles for both Hyprland and MangoWC
 - `cava` *(optional — audio visualiser)*
 - Symbols Nerd Font
 - SF Pro Display *(or a substitute)*
+- `iwctl` 
+
 
 1.0: Installation
 
