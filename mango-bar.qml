@@ -1,6 +1,3 @@
-// shell.qml — mango-bar for MangoWC
-// Redesigned: FreeBSD squircle rounding, XHR weather (no curl), GNOME-style calendar
-// Added: Music module with album art, track info, controls, and cava-style visualiser
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
@@ -315,8 +312,8 @@ ShellRoot {
     Process {
         command: [
             "bash", "-c",
-            "while true; do cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo 100; " +
-            "cat /sys/class/power_supply/BAT0/status 2>/dev/null || echo Unknown; sleep 30; done"
+            "while true; do cat /sys/class/power_supply/BAT1/capacity 2>/dev/null || echo 100; " +
+            "cat /sys/class/power_supply/BAT1/status 2>/dev/null || echo Unknown; sleep 30; done"
         ]
         running: true
         stdout: SplitParser {
@@ -370,24 +367,18 @@ ShellRoot {
     // ─── Music / MPRIS State ──────────────────────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════
 
-
-    // Current track info
     property string musicTitle:    "Nothing playing"
     property string musicArtist:   "—"
     property string musicAlbum:    ""
-    property string musicArtUrl:   ""          // file:// or http:// album art path
-    property string musicStatus:   "Stopped"   // Playing | Paused | Stopped
-    property int    musicPosition: 0           // microseconds
-    property int    musicLength:   0           // microseconds
-    property real   musicProgress: 0.0         // 0–1
-    property string musicPlayer:   ""          // player bus name suffix
+    property string musicArtUrl:   ""
+    property string musicStatus:   "Stopped"
+    property int    musicPosition: 0
+    property int    musicLength:   0
+    property real   musicProgress: 0.0
+    property string musicPlayer:   ""
 
-    // Cava visualiser bar heights (20 bars, values 0–1)
     property var cavaHeights: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
 
-    // ── Poll MPRIS2 via playerctl ──────────────────────────────────────────
-    // One field per line, flushed with a ---END--- sentinel.
-    // Avoids the \x01 delimiter trick which bash quietly swallows.
     Process {
         id: mprisProc
         command: [
@@ -405,8 +396,7 @@ ShellRoot {
         ]
         running: true
         stdout: SplitParser {
-            property var buf:   []
-
+            property var buf: []
             onRead: (line) => {
                 if (line.trim() === "---END---") {
                     if (buf.length >= 8) {
@@ -447,13 +437,6 @@ ShellRoot {
         }
     }
 
-    // ── Cava visualiser data via bash fifo ────────────────────────────────
-    // We run cava in raw output mode, parse the integer bar values, and
-    // normalise them to 0–1.  If cava isn't installed we gracefully fake it
-    // with animated noise so the widget doesn't look like a corpse.
-    //
-    // cava config is written to a temp file at startup so we don't clobber
-    // the user's own ~/.config/cava/config.
     property string cavaConfigPath: ""
     property bool   cavaAvailable:  false
 
@@ -469,7 +452,6 @@ ShellRoot {
         }
     }
 
-    // Write a minimal cava config to /tmp
     Process {
         id: writeCavaConfig
         command: [
@@ -499,7 +481,6 @@ ShellRoot {
         }
     }
 
-    // Run cava and read its raw ASCII output
     Process {
         id: cavaProc
         command: ["bash", "-c",
@@ -509,7 +490,6 @@ ShellRoot {
         running: false
         stdout: SplitParser {
             onRead: (line) => {
-                // cava raw ASCII: values separated by semicolons, terminated by semicolon
                 var parts = line.trim().replace(/;$/, "").split(";")
                 if (parts.length < 1) return
                 var bars = []
@@ -522,7 +502,6 @@ ShellRoot {
         }
     }
 
-    // Fake animated cava when cava is not installed — gentle sine-wave noise
     Timer {
         id: fakeCavaTimer
         interval: 80; running: !root.cavaAvailable; repeat: true
@@ -530,7 +509,6 @@ ShellRoot {
         onTriggered: {
             phase += 0.18
             var bars = []
-            // Only animate when something is playing
             var playing = root.musicStatus === "Playing"
             for (var i = 0; i < 20; i++) {
                 if (!playing) {
@@ -545,12 +523,8 @@ ShellRoot {
         }
     }
 
-    // Bridge flag — pill (inside panelWindow Variants) and musicPopupWindow
-    // (its own Variants) are in sibling scopes and can't reference each other
-    // directly. Both sides bind to this instead.
     property bool musicPopupVisible: false
 
-    // ── Playback control helpers ───────────────────────────────────────────
     Process { id: musicPlayPause; running: false }
     Process { id: musicNext;      running: false }
     Process { id: musicPrev;      running: false }
@@ -568,102 +542,167 @@ ShellRoot {
         musicPrev.running = true
     }
 
-
     // ═══════════════════════════════════════════════════════════════════════
-    // ─── WiFi State ───────────────────────────────────────────────────────
+    // ─── WiFi State (nmcli backend — NetworkManager + iwd) ────────────────
     // ═══════════════════════════════════════════════════════════════════════
-    property bool   wifiPopupVisible: false
-    property string wifiSsid:         ""        // currently connected SSID
-    property string wifiSignal:       ""        // signal icon
-    property var    wifiNetworks:     []         // [{ssid, signal, security, connected}]
-    property bool   wifiScanning:     false
-    property string wifiConnectMsg:   ""        // status message after connect attempt
-    property string wifiExpandedSsid:  ""        // which network has the password drawer open
-    property string wifiPasswordInput: ""        // current password field value
+    property bool   wifiPopupVisible:   false
+    property string wifiSsid:           ""
+    property int    wifiSignal:         0
+    property var    wifiNetworks:       []
+    property bool   wifiScanning:       false
+    property string wifiConnectMsg:     ""
+    property string wifiExpandedSsid:   ""
+    property string wifiPasswordInput:  ""
 
-    // ── Connected SSID — poll every 10s ───────────────────────────────────
+    // ── Live SSID + signal every 5s via nmcli ─────────────────────────────
+    // nmcli -t -f active,ssid,signal dev wifi gives us a clean terse line
+    // for the currently active AP.  No interface detection needed — NM knows.
     Process {
         id: wifiStatusProc
-        command: ["bash", "-c",
+        command: [
+            "bash", "-c",
             "while true; do " +
-            "  ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '/^yes/{print $2}' | head -1); " +
-            "  echo \"$ssid\"; sleep 10; " +
+            "  result=$(nmcli -t -f active,ssid,signal dev wifi 2>/dev/null | grep '^yes:'); " +
+            "  if [ -n \"$result\" ]; then " +
+            "    ssid=$(echo \"$result\" | cut -d: -f2); " +
+            "    signal=$(echo \"$result\" | cut -d: -f3); " +
+            "    echo \"$ssid\"; " +
+            "    echo \"${signal:-0}\"; " +
+            "  else " +
+            "    echo ''; " +
+            "    echo '0'; " +
+            "  fi; " +
+            "  sleep 5; " +
             "done"
         ]
         running: true
         stdout: SplitParser {
+            property bool nextIsSignal: false
             onRead: (line) => {
-                root.wifiSsid = line.trim()
-                root.wifiSignal = root.wifiSsid.length > 0 ? "\uf1eb" : "\uf1eb"
+                if (!nextIsSignal) { root.wifiSsid   = line.trim();              nextIsSignal = true  }
+                else               { root.wifiSignal = parseInt(line.trim()) || 0; nextIsSignal = false }
             }
         }
     }
 
-    // ── Scan for networks ─────────────────────────────────────────────────
+    // ── Scan with nmcli ───────────────────────────────────────────────────
+    // rescan is async in NM too, so we wait 2s before reading the list.
+    // Output format: SSID:SECURITY:SIGNAL:ACTIVE
+    // SSIDs can contain colons so we split from the right (last 3 fields are known).
     Process {
         id: wifiScanProc
-        command: ["bash", "-c",
-            "nmcli -t -f SSID,SIGNAL,SECURITY,IN-USE device wifi list 2>/dev/null | " +
-            "sort -t: -k2 -rn | " +
-            "awk -F: 'NF && !seen[$1]++' | head -20"
-        ]
         running: false
         stdout: SplitParser {
+            property var buf: []
             onRead: (line) => {
-                // nmcli -t format:  SSID:SIGNAL:SECURITY:IN-USE(* or empty)
-                var parts = line.split(":")
-                if (parts.length < 3) return
-                var ssid     = parts[0].trim()
-                var sig      = parseInt(parts[1]) || 0
-                var security = parts[2].trim()
-                var inUse    = parts[3] !== undefined && parts[3].trim() === "*"
+                var clean = line.trim()
+                if (clean.length === 0) return
+
+                // Split carefully — SSID may contain colons, last 3 fields are safe
+                var parts = clean.split(":")
+                if (parts.length < 4) return
+
+                var active   = parts[parts.length - 1]               // "yes" or "no"
+                var sig      = parseInt(parts[parts.length - 2]) || 0
+                var security = parts[parts.length - 3]               // "WPA2", "--", "WPA1 WPA2", etc
+                var ssid     = parts.slice(0, parts.length - 3).join(":")  // rejoin SSID
+
                 if (ssid.length === 0) return
-                var icon = sig >= 80 ? "\uf1eb"
-                         : sig >= 55 ? "\uf1eb"
-                         : sig >= 30 ? "\uf1eb"
-                         :             "\uf1eb"
-                // Vary opacity via a strength value instead since we only have one glyph
-                var list = root.wifiNetworks.slice()
-                list.push({ ssid: ssid, signal: sig, security: security, connected: inUse, icon: icon })
-                root.wifiNetworks = list
+
+                buf.push({
+                    ssid:      ssid,
+                    signal:    sig,
+                    security:  security === "--" ? "" : security,
+                    connected: active === "yes",
+                    icon:      "\uf1eb"
+                })
             }
         }
         onRunningChanged: {
-            if (!running) root.wifiScanning = false
+            if (!running) {
+                if (stdout.buf.length > 0)
+                    root.wifiNetworks = stdout.buf.slice()
+                stdout.buf        = []
+                root.wifiScanning = false
+            }
         }
     }
 
+    Timer {
+        id: wifiAutoRefreshTimer
+        interval: 15000; repeat: true
+        running:  root.wifiPopupVisible && !wifiScanProc.running
+        onTriggered: root.wifiStartScan()
+    }
+
     function wifiStartScan() {
-        root.wifiNetworks    = []
-        root.wifiScanning    = true
-        root.wifiConnectMsg  = ""
-        root.wifiExpandedSsid = ""
+        root.wifiScanning      = true
+        root.wifiConnectMsg    = ""
+        root.wifiExpandedSsid  = ""
         root.wifiPasswordInput = ""
+
+        wifiScanProc.command = [
+            "bash", "-c",
+            "nmcli dev wifi rescan 2>/dev/null; " +
+            "sleep 2; " +
+            "nmcli -t -f ssid,security,signal,active dev wifi list 2>/dev/null"
+        ]
         wifiScanProc.running = true
     }
 
-    // ── Connect to a network ──────────────────────────────────────────────
+    // ── Connect via nmcli ─────────────────────────────────────────────────
     Process {
         id: wifiConnectProc
         property string pendingSsid: ""
         running: false
+
+        stdout: SplitParser {
+            onRead: (line) => {
+                var clean = line.trim()
+                if (clean.length === 0) return
+                var low = clean.toLowerCase()
+                if (low.indexOf("successfully activated") !== -1 ||
+                    low.indexOf("connected") !== -1) {
+                    root.wifiConnectMsg = "✓  Connected to " + wifiConnectProc.pendingSsid
+                } else if (low.indexOf("error") !== -1 ||
+                           low.indexOf("failed") !== -1 ||
+                           low.indexOf("secrets") !== -1 ||
+                           low.indexOf("no network") !== -1) {
+                    root.wifiConnectMsg = "✕  " + (
+                        low.indexOf("secrets") !== -1
+                            ? "Wrong password"
+                            : low.indexOf("no network") !== -1
+                                ? "Network not found"
+                                : "Connection failed"
+                    )
+                }
+            }
+        }
+
         onRunningChanged: {
             if (!running) {
-                // Re-poll connected SSID after attempt
+                if (root.wifiConnectMsg.indexOf("Connecting") !== -1)
+                    root.wifiConnectMsg = "✕  Connection timed out"
+                // Refresh status pill and rescan
                 wifiStatusProc.running = false
                 wifiStatusProc.running = true
-                root.wifiConnectMsg = "Connecting to " + pendingSsid + "…"
-                Qt.callLater(function() { root.wifiStartScan() })
+                root.wifiStartScan()
             }
         }
     }
 
-    function wifiConnect(ssid) {
+    function wifiConnect(ssid, password) {
         wifiConnectProc.pendingSsid = ssid
-        var s = ssid.replace(/['"\\]/g, "")
-        wifiConnectProc.command = ["bash", "-c",
-            "nmcli device wifi connect '" + s + "' 2>&1 | tail -1"
-        ]
+        root.wifiConnectMsg         = "Connecting to " + ssid + "…"
+        root.wifiExpandedSsid       = ""
+
+        var s   = ssid.replace(/'/g, "")
+        var p   = (password || "").replace(/'/g, "")
+        var cmd = p.length > 0
+            ? "nmcli dev wifi connect '" + s + "' password '" + p + "' 2>&1"
+            : "nmcli dev wifi connect '" + s + "' 2>&1"
+
+        wifiConnectProc.command = ["bash", "-c", cmd]
         wifiConnectProc.running = true
     }
 
@@ -761,7 +800,7 @@ ShellRoot {
                         }
                         Text {
                             anchors.centerIn: parent
-                            text: "\uf31f"
+                            text: "\uf303"
                             font.family: "Symbols Nerd Font"; font.pixelSize: 18; color: "white"
                         }
                         MouseArea {
@@ -843,7 +882,6 @@ ShellRoot {
                         Text { text: root.batCapacity + "%"; font.pixelSize: 12; font.family: "SF Pro Display"; color: root.batColor }
                     }
 
-
                     // ── WiFi Pill ──────────────────────────────────────────
                     Item {
                         id: wifiPill
@@ -856,11 +894,28 @@ ShellRoot {
                         }
                         RowLayout {
                             id: wifiPillRow; anchors.centerIn: parent; spacing: 6
-                            Text {
-                                text: root.wifiSsid.length > 0 ? "\uf1eb" : "\uf204"
-                                font.family: "Symbols Nerd Font"; font.pixelSize: 14
-                                color: root.wifiSsid.length > 0 ? "white" : Qt.rgba(1,1,1,0.35)
+
+                            // Signal strength bars — nmcli gives 0–100, map to 4 bars
+                            Row {
+                                spacing: 2
+                                Repeater {
+                                    model: 4
+                                    delegate: Rectangle {
+                                        width: 3
+                                        height: 4 + index * 3
+                                        radius: 1
+                                        anchors.bottom: parent ? parent.bottom : undefined
+                                        color: {
+                                            if (root.wifiSsid.length === 0) return Qt.rgba(1,1,1,0.15)
+                                            return root.wifiSignal >= (index + 1) * 25
+                                                ? "white"
+                                                : Qt.rgba(1,1,1,0.20)
+                                        }
+                                        Behavior on color { ColorAnimation { duration: 200 } }
+                                    }
+                                }
                             }
+
                             Text {
                                 text: root.wifiSsid.length > 0 ? root.wifiSsid : "No WiFi"
                                 font.family: "SF Pro Display"; font.pixelSize: 12
@@ -907,14 +962,11 @@ ShellRoot {
                         }
                     }
 
-                    // ══════════════════════════════════════════════════════
-                    // ── Music Pill ────────────────────────────────────────
-                    // ══════════════════════════════════════════════════════
+                    // ── Music Pill ─────────────────────────────────────────
                     Item {
                         id: musicPill
                         implicitWidth: musicPillRow.implicitWidth + 18
                         implicitHeight: 30
-                        // Always visible so you can see the damn thing exists
                         visible: true
 
                         Rectangle {
@@ -926,7 +978,6 @@ ShellRoot {
                         RowLayout {
                             id: musicPillRow; anchors.centerIn: parent; spacing: 7
 
-                            // Mini waveform indicator (5 mini bars)
                             Row {
                                 spacing: 2
                                 Repeater {
@@ -936,7 +987,6 @@ ShellRoot {
                                         color: root.musicStatus === "Playing"
                                             ? Qt.rgba(0.72, 0.88, 1.0, 0.85)
                                             : Qt.rgba(1,1,1,0.30)
-                                        // Animate height when playing
                                         height: root.musicStatus === "Playing"
                                             ? Math.max(4, root.cavaHeights[index * 3] * 14)
                                             : 6
@@ -947,14 +997,12 @@ ShellRoot {
                                 }
                             }
 
-                            // Truncated title
                             Text {
                                 text: root.musicTitle
                                 font.pixelSize: 11; font.family: "SF Pro Display"
                                 color: "white"
                                 elide: Text.ElideRight
                                 maximumLineCount: 1
-                                // Cap width so it doesn't consume the entire bar
                                 Layout.maximumWidth: 160
                             }
                         }
@@ -1617,7 +1665,7 @@ ShellRoot {
             }
 
             // ══════════════════════════════════════════════════════════════
-            // ── Weather Popup ─────────────────────────────────────════════
+            // ── Weather Popup ─────────────────────────────────────────────
             // ══════════════════════════════════════════════════════════════
             PanelWindow {
                 id: weatherPopupWindow
@@ -1835,10 +1883,7 @@ ShellRoot {
     }  // Variants
 
     // ══════════════════════════════════════════════════════════════════════
-    // ── Music Popup — top-level sibling of panelWindow, not a child ───────
-    // Anchored exactly like weatherPopupWindow: right:12, top/bottom:66.
-    // Being a sibling means the compositor positions it against the screen
-    // edge rather than inheriting some fantasy offset from a parent window.
+    // ── Music Popup ────────────────────────────────────────────────────────
     // ══════════════════════════════════════════════════════════════════════
     Variants {
         model: Quickshell.screens
@@ -1863,7 +1908,6 @@ ShellRoot {
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.exclusiveZone: -1
 
-            // ── Glass card background ──────────────────────────────────────
             Rectangle {
                 anchors.fill: parent; radius: root.panelRadius
                 color: Qt.rgba(0.06, 0.07, 0.10, 0.55)
@@ -1880,7 +1924,6 @@ ShellRoot {
                 anchors { top: parent.top; left: parent.left; right: parent.right; margins: 16 }
                 spacing: 0
 
-                // ── Header ─────────────────────────────────────────────────
                 RowLayout {
                     width: parent.width; height: 30
 
@@ -1935,11 +1978,9 @@ ShellRoot {
                 Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.07) }
                 Item { width: 1; height: 12 }
 
-                // ── Album art + track info ──────────────────────────────────
                 RowLayout {
                     width: parent.width; height: 80; spacing: 14
 
-                    // Album art
                     Item {
                         width: 80; height: 80
 
@@ -1974,7 +2015,6 @@ ShellRoot {
                         }
                     }
 
-                    // Title / artist / album
                     Column {
                         Layout.fillWidth: true; spacing: 5
 
@@ -2005,7 +2045,6 @@ ShellRoot {
 
                 Item { width: 1; height: 16 }
 
-                // ── Progress bar ────────────────────────────────────────────
                 Item {
                     width: parent.width; height: 3
 
@@ -2047,13 +2086,11 @@ ShellRoot {
 
                 Item { width: 1; height: 14 }
 
-                // ── Playback controls ───────────────────────────────────────
                 RowLayout {
                     width: parent.width; spacing: 0
 
                     Item { Layout.fillWidth: true }
 
-                    // Previous
                     Item {
                         implicitWidth: 40; implicitHeight: 40
                         Rectangle {
@@ -2076,7 +2113,6 @@ ShellRoot {
 
                     Item { implicitWidth: 8 }
 
-                    // Play / Pause
                     Item {
                         implicitWidth: 56; implicitHeight: 40
                         Rectangle {
@@ -2101,7 +2137,6 @@ ShellRoot {
 
                     Item { implicitWidth: 8 }
 
-                    // Next
                     Item {
                         implicitWidth: 40; implicitHeight: 40
                         Rectangle {
@@ -2129,7 +2164,6 @@ ShellRoot {
                 Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.07) }
                 Item { width: 1; height: 12 }
 
-                // ── Cava-style visualiser ───────────────────────────────────
                 Item {
                     width: parent.width; height: 64
 
@@ -2149,7 +2183,7 @@ ShellRoot {
                             ctx.clearRect(0, 0, width, height)
 
                             var bars    = root.cavaHeights
-                            var n       = bars.length          // 20
+                            var n       = bars.length
                             var bW      = 7
                             var totalW  = n * bW
                             var totalGap = width - totalW
@@ -2211,7 +2245,7 @@ ShellRoot {
     }  // Variants (music popup)
 
     // ══════════════════════════════════════════════════════════════════════
-    // ── WiFi Popup — top-level Variants, same pattern as music popup ──────
+    // ── WiFi Popup ─────────────────────────────────────────────────────────
     // ══════════════════════════════════════════════════════════════════════
     Variants {
         model: Quickshell.screens
@@ -2266,7 +2300,6 @@ ShellRoot {
                     width: parent.width
                     spacing: 0
 
-                    // ── Header ────────────────────────────────────────────
                     RowLayout {
                         width: parent.width; height: 30
 
@@ -2282,7 +2315,6 @@ ShellRoot {
                                 font.family: "SF Pro Display"; font.pixelSize: 12
                                 font.weight: Font.SemiBold; color: "white"
                             }
-                            // Connected badge
                             Rectangle {
                                 visible: root.wifiSsid.length > 0
                                 radius: root.pillRadius; height: 16
@@ -2302,7 +2334,6 @@ ShellRoot {
 
                         Item { Layout.fillWidth: true }
 
-                        // Scan / refresh button
                         Item {
                             implicitWidth: 22; implicitHeight: 22
                             Rectangle {
@@ -2331,7 +2362,6 @@ ShellRoot {
 
                         Item { implicitWidth: 6 }
 
-                        // Close button
                         Item {
                             implicitWidth: 22; implicitHeight: 22
                             Rectangle {
@@ -2349,7 +2379,6 @@ ShellRoot {
                         }
                     }
 
-                    // Status / connect message
                     Item {
                         width: parent.width
                         height: root.wifiConnectMsg.length > 0 ? 28 : 0
@@ -2368,7 +2397,6 @@ ShellRoot {
                     Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.07) }
                     Item { width: 1; height: 8 }
 
-                    // ── Scanning spinner / empty state ────────────────────
                     Item {
                         width: parent.width; height: 48
                         visible: root.wifiScanning || root.wifiNetworks.length === 0
@@ -2395,7 +2423,6 @@ ShellRoot {
                         }
                     }
 
-                    // ── Network list ──────────────────────────────────────
                     Column {
                         width: parent.width; spacing: 4
                         visible: !root.wifiScanning && root.wifiNetworks.length > 0
@@ -2410,17 +2437,14 @@ ShellRoot {
                                 property bool isConnected:  modelData.connected || modelData.ssid === root.wifiSsid
                                 property bool isSecured:    modelData.security.length > 0 && modelData.security !== "--"
                                 property bool isExpanded:   root.wifiExpandedSsid === modelData.ssid
-                                // Row + animated password drawer
                                 height: isExpanded ? 116 : 38
                                 Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                                 clip: true
 
-                                // ── Network row background ─────────────────
                                 Rectangle {
                                     id: netRowBg
-                                    x: 0; y: 0; width: parent.width
-                                    height: 38
-                                    radius: isExpanded ? root.pillRadius : root.pillRadius
+                                    x: 0; y: 0; width: parent.width; height: 38
+                                    radius: root.pillRadius
                                     color: isConnected
                                         ? Qt.rgba(0.20, 0.78, 0.35, 0.14)
                                         : netHover.containsMouse
@@ -2438,7 +2462,6 @@ ShellRoot {
                                     anchors { left: parent.left; right: parent.right; leftMargin: 10; rightMargin: 10 }
                                     spacing: 10
 
-                                    // Signal bars
                                     Row {
                                         spacing: 2
                                         Repeater {
@@ -2457,7 +2480,6 @@ ShellRoot {
                                         }
                                     }
 
-                                    // SSID
                                     Text {
                                         Layout.fillWidth: true
                                         text: modelData.ssid
@@ -2469,7 +2491,6 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 110 } }
                                     }
 
-                                    // Lock icon
                                     Text {
                                         visible: isSecured
                                         text: "\uf023"
@@ -2478,7 +2499,6 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 110 } }
                                     }
 
-                                    // Connected tick
                                     Text {
                                         visible: isConnected
                                         text: "\uf00c"
@@ -2486,7 +2506,6 @@ ShellRoot {
                                         color: Qt.rgba(0.30, 0.90, 0.45, 0.90)
                                     }
 
-                                    // Chevron — shows when expanded
                                     Text {
                                         visible: isExpanded && !isConnected
                                         text: "\uf077"
@@ -2495,7 +2514,6 @@ ShellRoot {
                                     }
                                 }
 
-                                // Click row — open drawer if secured, connect directly if open
                                 MouseArea {
                                     id: netHover
                                     x: 0; y: 0; width: parent.width; height: 38
@@ -2504,7 +2522,6 @@ ShellRoot {
                                     onClicked: {
                                         if (isConnected) return
                                         if (isSecured) {
-                                            // Toggle drawer; clear other expanded entries
                                             root.wifiExpandedSsid = isExpanded ? "" : modelData.ssid
                                             root.wifiPasswordInput = ""
                                             root.wifiConnectMsg    = ""
@@ -2514,12 +2531,10 @@ ShellRoot {
                                     }
                                 }
 
-                                // ── Password drawer ────────────────────────
                                 Item {
                                     id: pwDrawer
                                     x: 0; y: 38 + 6
-                                    width: parent.width
-                                    height: 68
+                                    width: parent.width; height: 68
                                     opacity: isExpanded ? 1.0 : 0.0
                                     Behavior on opacity { NumberAnimation { duration: 160 } }
 
@@ -2533,18 +2548,15 @@ ShellRoot {
                                         anchors { fill: parent; margins: 10 }
                                         spacing: 7
 
-                                        // Password field row
                                         RowLayout {
                                             width: parent.width; height: 28; spacing: 8
 
-                                            // Lock glyph
                                             Text {
                                                 text: "\uf023"
                                                 font.family: "Symbols Nerd Font"; font.pixelSize: 11
                                                 color: Qt.rgba(0.72, 0.88, 1.0, 0.50)
                                             }
 
-                                            // Text input
                                             Rectangle {
                                                 Layout.fillWidth: true; height: 28; radius: root.pillRadius
                                                 color: Qt.rgba(1,1,1,0.07)
@@ -2561,9 +2573,7 @@ ShellRoot {
                                                     font.family: "SF Pro Display"; font.pixelSize: 12
                                                     color: "white"
                                                     selectionColor: Qt.rgba(0.42, 0.68, 1.0, 0.35)
-                                                    // Sync to root so the connect button can read it
                                                     onTextChanged: root.wifiPasswordInput = text
-                                                    // Enter key connects
                                                     onAccepted: {
                                                         if (text.length > 0) {
                                                             root.wifiConnect(modelData.ssid, text)
@@ -2572,7 +2582,6 @@ ShellRoot {
                                                     }
                                                 }
 
-                                                // Placeholder shown when TextInput is empty & unfocused
                                                 Text {
                                                     anchors { fill: parent; leftMargin: 10 }
                                                     verticalAlignment: Text.AlignVCenter
@@ -2583,7 +2592,6 @@ ShellRoot {
                                                 }
                                             }
 
-                                            // Connect button
                                             Item {
                                                 implicitWidth: 32; implicitHeight: 28
                                                 Rectangle {
@@ -2593,8 +2601,7 @@ ShellRoot {
                                                     Behavior on color { ColorAnimation { duration: 110 } }
                                                 }
                                                 Text {
-                                                    anchors.centerIn: parent
-                                                    text: "\uf061"
+                                                    anchors.centerIn: parent; text: "\uf061"
                                                     font.family: "Symbols Nerd Font"; font.pixelSize: 12
                                                     color: Qt.rgba(0.72, 0.88, 1.0, 0.90)
                                                 }
@@ -2611,7 +2618,6 @@ ShellRoot {
                                                 }
                                             }
 
-                                            // Cancel
                                             Item {
                                                 implicitWidth: 28; implicitHeight: 28
                                                 Rectangle {
@@ -2653,5 +2659,5 @@ ShellRoot {
         }
     }  // Variants (wifi popup)
 
-
 }  // ShellRoot
+
