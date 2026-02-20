@@ -2677,8 +2677,7 @@ ShellRoot {
         }
     }  // Variants (wifi popup)
 
-}  // ShellRoot
-
+} 
 
 
 
